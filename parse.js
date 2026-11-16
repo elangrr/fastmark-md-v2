@@ -108,9 +108,12 @@ function numRef(m, dec, hex) {
   if (c === 0 || c > 1114111 || (c >= 55296 && c <= 57343)) return '\uFFFD';
   return c === 38 ? '&amp;' : String.fromCodePoint(c);
 }
-function decodeRefs(s) { return reNumRef.test(s) ? s.replace(reNumRefOrAmp, numRef) : s; }
+function decodeRefs(s) { return s.includes('&#') && reNumRef.test(s) ? s.replace(reNumRefOrAmp, numRef) : s; }
 
+// chars encodeURI keeps as they are ('%' becomes %25, which marked turns back into '%')
+const reUriPlain = /^[\w;,/?:@&=+$\-.!~*'()#%]*$/;
 function safeUri(s) {
+  if (reUriPlain.test(s)) return s;
   try { return encodeURI(s).replace(/%25/g, '%'); } catch { return null; }
 }
 
@@ -453,7 +456,12 @@ function interrupts(s, k, all) {
   let sp = 0;
   while (sp < s.length && s.charCodeAt(sp) === 32) sp++;
   if (sp > k) return false;
-  switch (s.charCodeAt(sp)) {
+  return startsBlock(s, s.charCodeAt(sp), k, all);
+}
+
+// interrupts() once the indentation (<= k) and the first non-space char code c are known
+function startsBlock(s, c, k, all) {
+  switch (c) {
     case 96: case 126: return reFenceIn[k].test(s);
     case 35: return reHeadIn[k].test(s);
     case 60: return reHtmlIn[k].test(s);
@@ -500,22 +508,33 @@ function list(src) {
     }
     if (!endEarly) {
       const k = Math.max(0, Math.min(3, indent - 1));
-      while (src) {
-        const rawLine = lineOf(src);
-        next = rawLine;
-        const expanded = next.indexOf('\t') === -1 ? next : leadTabs(next, 0);
-        if (interrupts(next, k, true)) break;
-        if (expanded.search(/[^ ]/) >= indent || !next.trim()) {
+      // walk the following lines by index; src is cut once at the end
+      const sl = src.length;
+      let at = 0;
+      while (at < sl) {
+        const nl = src.indexOf('\n', at);
+        const lineEnd = nl < 0 ? sl : nl;
+        next = src.slice(at, lineEnd);
+        const len = next.length;
+        let sp = 0;
+        while (sp < len && next.charCodeAt(sp) === 32) sp++;
+        const c = next.charCodeAt(sp);
+        let expanded = next, nonSp = sp < len ? sp : -1;
+        if (c === 9) { expanded = leadTabs(next, 0); nonSp = expanded.search(/[^ ]/); }
+        if (sp <= k && startsBlock(next, c, k, true)) break;
+        const isBlank = sp === len || (!(c > 32 && c < 127) && !next.trim());
+        if (nonSp >= indent || isBlank) {
           body += '\n' + expanded.slice(indent);
         } else {
           if (blank || line.replace(/\t/g, '    ').search(/[^ ]/) >= 4 || interrupts(line, k, false)) break;
           const setext = /^ {0,3}(?:=+|-+) *$/.test(next) && reLheading.test(`${line}\n${next}`);
           body += '\n' + (setext ? `    ${expanded.replace(/^ {0,3}/, '')}` : next);
         }
-        blank = !next.trim();
-        src = src.substring(rawLine.length + 1);
+        blank = isBlank;
+        at = lineEnd + 1;
         line = expanded.slice(indent);
       }
+      src = at >= sl ? '' : src.substring(at);
     }
     const itemRaw = orig.slice(startAt, orig.length - src.length);
     if (!lst.loose) {
