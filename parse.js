@@ -4,7 +4,6 @@
 // HTML strings instead of building token trees, and avoids marked's option/extension plumbing.
 
 const R = String.raw;
-const SHADOW = false;
 const BT = '`';
 
 // ---------------------------------------------------------------------------------------------
@@ -494,7 +493,7 @@ function list(src) {
       while (src) {
         const rawLine = lineOf(src);
         next = rawLine;
-        const expanded = leadTabs(next, 0);
+        const expanded = next.indexOf('\t') === -1 ? next : leadTabs(next, 0);
         if (interrupts(next, k, true)) break;
         if (expanded.search(/[^ ]/) >= indent || !next.trim()) {
           body += '\n' + expanded.slice(indent);
@@ -513,7 +512,7 @@ function list(src) {
       if (blankEnded) lst.loose = true;
       else if (endsWithBlankLine(itemRaw)) blankEnded = true;
     }
-    lst.items.push({ raw: itemRaw, task: /^\[[ xX]\][ \t]+\S/.test(body), checked: undefined, text: body, tokens: null });
+    lst.items.push({ raw: itemRaw, task: body.charCodeAt(0) === 91 && /^\[[ xX]\][ \t]+\S/.test(body), checked: undefined, text: body, tokens: null });
   }
   const lastItem = lst.items[lst.items.length - 1];
   if (!lastItem) return undefined;
@@ -681,7 +680,7 @@ function autoLinkHtml(text, href, mode) {
 function lexInline(src, mode) {
   const whole = src;
   let masked = null;
-  let hasAt = -1, hasColon = false;
+  let atIdx = -2;
   let out = '';
   let pend = null, pendEsc = false;
   let keepPrev = false, prev = '';
@@ -790,7 +789,17 @@ function lexInline(src, mode) {
       continue;
     }
     // bare url / email
-    if (!inLink && (m = reUrl.exec(src))) {
+    let urlOk = false;
+    if (!inLink) {
+      if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119 || c === 109 || c === 120) urlOk = true;
+      else if (isAlnum(c) || c === 46 || c === 95 || c === 43 || c === 45) {
+        // email branch: needs an '@' ahead
+        const pos = whole.length - src.length;
+        if (atIdx !== -1 && atIdx < pos) atIdx = whole.indexOf('@', pos);
+        urlOk = atIdx !== -1;
+      }
+    }
+    if (urlOk && (m = reUrl.exec(src))) {
       let text, href;
       if (m[2] === '@') { text = m[0]; href = 'mailto:' + text; }
       else {
@@ -818,77 +827,8 @@ function lexInline(src, mode) {
   return out;
 }
 
-// Character classes for the text scanner: bit 1 = [a-zA-Z0-9], bit 2 = email-local char.
-const CLS = new Uint8Array(128);
-for (let i = 0; i < 128; i++) {
-  const ch = String.fromCharCode(i);
-  if (/[a-zA-Z0-9]/.test(ch)) CLS[i] |= 1;
-  if (/[a-zA-Z0-9.!#$%&'*+/=?_`{|}~-]/.test(ch)) CLS[i] |= 2;
-}
-const isAlnum = (c) => c < 128 && (CLS[c] & 1) !== 0;
-const isMailCh = (c) => c < 128 && (CLS[c] & 2) !== 0;
-
-function isJsSpace(c) {
-  return c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
-    c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
-}
-
-// at i: two or more spaces then a newline
-function spacesNl(s, i) {
-  if (s.charCodeAt(i) !== 32 || s.charCodeAt(i + 1) !== 32) return false;
-  i += 2;
-  while (s.charCodeAt(i) === 32) i++;
-  return s.charCodeAt(i) === 10;
-}
-
-// at i: one or more email-local chars then '@'
-function mailAhead(s, i) {
-  let j = i;
-  while (j < s.length && isMailCh(s.charCodeAt(j))) j++;
-  return j > i && s.charCodeAt(j) === 64;
-}
-
-function mailProto(s, i) {
-  return s.startsWith('mailto:', i) || s.startsWith('xmpp:', i);
-}
-
-// Length of marked's inline text token at the start of s (same result as its gfm text regex).
-function textLen(s, at, colon) {
-  const n = s.length;
-  const c0 = s.charCodeAt(0);
-  if (colon && !isAlnum(c0) && mailProto(s, 1)) return 1;
-  let p = 1;
-  if (c0 === 96 || c0 === 126) while (p < n && s.charCodeAt(p) === c0) p++;
-  if (p >= n) return n;
-  const c1 = s.charCodeAt(p);
-  if (c1 === 96 || c1 === 126) return p;
-  if (c1 === 32 && spacesNl(s, p)) return p;
-  if (at && mailAhead(s, p)) return p;
-  for (let q = p; q < n; q++) {
-    const ch = s.charCodeAt(q);
-    switch (ch) {
-      case 92: case 60: case 33: case 91: case 96: case 42: case 126: case 95: return q;
-      case 104: case 72: {
-        const a = s.charCodeAt(q + 1) | 32, b = s.charCodeAt(q + 2) | 32, d = s.charCodeAt(q + 3) | 32;
-        if (a === 116 && b === 116 && d === 112) return q;
-        break;
-      }
-      case 102: case 70:
-        if ((s.charCodeAt(q + 1) | 32) === 116 && (s.charCodeAt(q + 2) | 32) === 112 && s.startsWith('://', q + 3)) return q;
-        break;
-      case 119:
-        if (s.startsWith('ww.', q + 1)) {
-          const b = s.charCodeAt(q - 1);
-          if (b === 42 || b === 95 || b === 126 || b === 40 || isJsSpace(b)) return q;
-        }
-        break;
-    }
-    if (ch !== 32 && s.charCodeAt(q + 1) === 32 && spacesNl(s, q + 1)) return q + 1;
-    if (colon && !isAlnum(ch) && mailProto(s, q + 1)) return q + 1;
-    if (at && !isMailCh(ch) && mailAhead(s, q + 1)) return q + 1;
-  }
-  return n;
-}
+// [a-zA-Z0-9] by char code
+const isAlnum = (c) => (c >= 48 && c <= 57) || ((c | 32) >= 97 && (c | 32) <= 122);
 
 function inlineLink(src, m, mode) {
   if (labelHasOpenTag(src, m[1], m[0].charAt(0) === '!' ? 2 : 1)) return undefined;
@@ -918,8 +858,20 @@ function inlineLink(src, m, mode) {
   return res;
 }
 
-const cpLen = (s) => { let n = 0; for (const _ of s) n++; return n; };
-const lastCp = (s) => { let r = ''; for (const ch of s) r = ch; return r; };
+// code point count (surrogate pairs count once), without the string iterator
+function cpLen(s) {
+  let n = s.length;
+  for (let i = 1; i < s.length; i++) {
+    if ((s.charCodeAt(i) & 0xfc00) === 0xdc00 && (s.charCodeAt(i - 1) & 0xfc00) === 0xd800) n--;
+  }
+  return n;
+}
+// last code point of s ('' for the empty string)
+function lastCp(s) {
+  const n = s.length;
+  if (n >= 2 && (s.charCodeAt(n - 1) & 0xfc00) === 0xdc00 && (s.charCodeAt(n - 2) & 0xfc00) === 0xd800) return s.slice(n - 2);
+  return n ? s.slice(n - 1) : '';
+}
 const firstCpLen = (s) => { const c = s.charCodeAt(0); return c >= 0xd800 && c <= 0xdbff && s.length > 1 && (s.charCodeAt(1) & 0xfc00) === 0xdc00 ? 2 : 1; };
 
 // returns [consumed length, html] or undefined
