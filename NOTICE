@@ -1,0 +1,7 @@
+fastmark reimplements the parsing behaviour of marked so that its output matches marked 18.1.3
+byte for byte. Its block and inline grammar (regular expressions) and lexing algorithm follow marked's.
+
+marked - https://github.com/markedjs/marked
+MIT License
+Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/)
+Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/)
