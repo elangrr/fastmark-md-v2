@@ -220,7 +220,7 @@ function splitCells(row, count) {
 // ---------------------------------------------------------------------------------------------
 // Per-parse state (reset on every call)
 // ---------------------------------------------------------------------------------------------
-let links, queue, top, inLink, inRawBlock, linkEmitted, parenPossible;
+let links, nLinks, queue, top, inLink, inRawBlock, linkEmitted, parenPossible;
 
 function enqueue(src) {
   const q = { src, html: '', pre: '' };
@@ -282,7 +282,7 @@ function blockTokens(src, toks, lazy) {
           last.text += '\n' + tok.raw;
           queue[queue.length - 1].src = last.text;
         } else {
-          if (!links[tok.tag]) links[tok.tag] = { href: tok.href, title: tok.title };
+          if (!links[tok.tag]) { links[tok.tag] = { href: tok.href, title: tok.title }; nLinks++; }
           toks.push(tok);
         }
         continue;
@@ -652,13 +652,37 @@ function maskRef(r) {
   return '[' + 'a'.repeat(r.length - 2) + ']';
 }
 
+// marked's emphasis mask: reference links, escaped punctuation, code spans, inline links and tags
+// are overwritten (length-preserving) so delimiter runs inside them are not seen. Each pass is
+// skipped when it provably cannot change the string.
 function mask(src) {
   let t = src;
   const br = src.includes('['), bt = src.includes('`');
-  if (br) t = t.replace(reRefSearch, maskRef);
-  if (bt || src.includes('\\')) t = t.replace(reAnyPunctOutsideCode, (m, ticks, esc) => (esc ? '+'.repeat(m.length) : ticks ? ticks + m.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks : m));
-  if (br || bt || src.includes('<')) t = t.replace(reBlockSkip, (m) => '[' + 'a'.repeat(m.length - 2) + ']');
+  // pass 1 only rewrites `[label]` groups that close with a ']' not followed by '(' and name a
+  // defined link
+  if (br && nLinks > 0 && refCandidate(src)) t = t.replace(reRefSearch, maskRef);
+  // pass 2 only changes escapes and code spans that contain backticks (needing a `` delimiter)
+  if (src.includes('\\') || src.includes('``')) t = t.replace(reAnyPunctOutsideCode, (m, ticks, esc) => (esc ? '+'.repeat(m.length) : ticks ? ticks + m.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks : m));
+  if (br || bt || src.includes('<')) t = skipMask(t);
   return t;
+}
+
+function refCandidate(s) {
+  for (let j = s.indexOf(']'); j !== -1; j = s.indexOf(']', j + 1)) if (s.charCodeAt(j + 1) !== 40) return true;
+  return false;
+}
+
+const A_RUN = 'a'.repeat(512);
+// t.replace(reBlockSkip, m => '[' + 'a'.repeat(m.length - 2) + ']') without a callback per match
+function skipMask(t) {
+  reBlockSkip.lastIndex = 0;
+  let out = '', last = 0, m;
+  while ((m = reBlockSkip.exec(t)) !== null) {
+    const len = m[0].length;
+    out += t.slice(last, m.index) + '[' + (len <= 514 ? A_RUN.slice(0, len - 2) : 'a'.repeat(len - 2)) + ']';
+    last = m.index + len;
+  }
+  return last === 0 ? t : out + t.slice(last);
 }
 
 // does the link label contain an html tag / autolink that runs past its end?
@@ -1071,6 +1095,7 @@ function cell(tag, align, q) {
 // ---------------------------------------------------------------------------------------------
 export function parse(markdown) {
   links = Object.create(null);
+  nLinks = 0;
   queue = [];
   top = true;
   inLink = false;
