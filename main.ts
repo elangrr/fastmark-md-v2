@@ -1,7 +1,12 @@
 // fastmark driver: render every case of /input/cases.json with parse() and write /output/html.json.
 // MAKEFUN_INPUT_DIR / MAKEFUN_OUTPUT_DIR override the directories for local runs.
 import { readFileSync, writeFileSync } from 'node:fs';
-import { parse } from './parse.js';
+import { setFlagsFromString } from 'node:v8';
+
+// A single cold run renders ~3 MB once: TurboFan's (background) compile CPU costs more than it
+// saves here, so stay on the interpreter/baseline/Maglev tiers. Set before parse.js is loaded.
+setFlagsFromString('--no-opt');
+const { parse } = await import('./parse.js');
 
 const inDir = process.env.MAKEFUN_INPUT_DIR || '/input';
 const outDir = process.env.MAKEFUN_OUTPUT_DIR || '/output';

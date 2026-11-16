@@ -14,7 +14,7 @@ const OUT = mkdtempSync(join(tmpdir(), 'mdbench-'));
 const hook = pathToFileURL('tools/cpu-hook.mjs').href;
 const res = Object.fromEntries(scripts.map((s) => [s, []]));
 for (let i = 0; i < N; i++) for (const s of scripts) {
-  const p = spawnSync(process.execPath, ['--import', hook, s], { env: { ...process.env, MAKEFUN_INPUT_DIR: IN, MAKEFUN_OUTPUT_DIR: OUT }, encoding: 'utf8' });
+  const p = spawnSync(process.env.NODE_BIN || process.execPath,['--import', hook, s], { env: { ...process.env, MAKEFUN_INPUT_DIR: IN, MAKEFUN_OUTPUT_DIR: OUT }, encoding: 'utf8' });
   const m = /CPU ([\d.]+)/.exec(p.stderr);
   if (p.status !== 0 || !m) { console.error(p.stderr); process.exit(1); }
   res[s].push(+m[1]);

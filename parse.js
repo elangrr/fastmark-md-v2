@@ -4,6 +4,7 @@
 // HTML strings instead of building token trees, and avoids marked's option/extension plumbing.
 
 const R = String.raw;
+const SHADOW = false;
 const BT = '`';
 
 // ---------------------------------------------------------------------------------------------
@@ -260,7 +261,7 @@ function blockTokens(src, toks, lazy) {
       }
     }
     if ((tok = table(src))) { src = src.substring(tok.raw.length); toks.push(tok); continue; }
-    if ((m = reLheading.exec(src))) {
+    if (maybeSetext(src) && (m = reLheading.exec(src))) {
       const text = m[1].trim();
       tok = { type: 'heading', raw: rtrimCh(m[0], '\n'), depth: m[2].charAt(0) === '=' ? 1 : 2, q: enqueue(text) };
       src = src.substring(tok.raw.length);
@@ -298,6 +299,23 @@ function blockTokens(src, toks, lazy) {
   }
   top = true;
   return toks;
+}
+
+// Necessary condition for a setext heading: before the first blank line, some line after the
+// first starts with at most 3 spaces and then '=' or '-'.
+function maybeSetext(s) {
+  let i = s.indexOf('\n');
+  while (i !== -1) {
+    let j = i + 1;
+    while (s.charCodeAt(j) === 32) j++;
+    const c = s.charCodeAt(j);
+    if ((c === 61 || c === 45) && j - i - 1 <= 3) return true;
+    let k = j;
+    while (s.charCodeAt(k) === 32 || s.charCodeAt(k) === 9) k++;
+    if (k >= s.length || s.charCodeAt(k) === 10) return false;
+    i = s.indexOf('\n', k);
+  }
+  return false;
 }
 
 function indentedCode(src) {
@@ -663,6 +681,7 @@ function autoLinkHtml(text, href, mode) {
 function lexInline(src, mode) {
   const whole = src;
   let masked = null;
+  let hasAt = -1, hasColon = false;
   let out = '';
   let pend = null, pendEsc = false;
   let keepPrev = false, prev = '';
@@ -786,19 +805,89 @@ function lexInline(src, mode) {
       continue;
     }
     // text
-    if ((m = reInlineText.exec(src))) {
-      const raw = m[0];
+    {
+      const raw = reInlineText.exec(src)[0];
       const text = inRawBlock ? raw : decodeRefs(raw);
       src = src.substring(raw.length);
       if (raw.charCodeAt(raw.length - 1) !== 95) prev = raw.slice(-1);
       keepPrev = true;
       if (pend !== null) pend += text; else { pend = text; pendEsc = inRawBlock; }
-      continue;
     }
-    if (src) throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
   }
   if (pend !== null) out += (mode || pendEsc) ? pend : escSoft(pend);
   return out;
+}
+
+// Character classes for the text scanner: bit 1 = [a-zA-Z0-9], bit 2 = email-local char.
+const CLS = new Uint8Array(128);
+for (let i = 0; i < 128; i++) {
+  const ch = String.fromCharCode(i);
+  if (/[a-zA-Z0-9]/.test(ch)) CLS[i] |= 1;
+  if (/[a-zA-Z0-9.!#$%&'*+/=?_`{|}~-]/.test(ch)) CLS[i] |= 2;
+}
+const isAlnum = (c) => c < 128 && (CLS[c] & 1) !== 0;
+const isMailCh = (c) => c < 128 && (CLS[c] & 2) !== 0;
+
+function isJsSpace(c) {
+  return c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+    c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+}
+
+// at i: two or more spaces then a newline
+function spacesNl(s, i) {
+  if (s.charCodeAt(i) !== 32 || s.charCodeAt(i + 1) !== 32) return false;
+  i += 2;
+  while (s.charCodeAt(i) === 32) i++;
+  return s.charCodeAt(i) === 10;
+}
+
+// at i: one or more email-local chars then '@'
+function mailAhead(s, i) {
+  let j = i;
+  while (j < s.length && isMailCh(s.charCodeAt(j))) j++;
+  return j > i && s.charCodeAt(j) === 64;
+}
+
+function mailProto(s, i) {
+  return s.startsWith('mailto:', i) || s.startsWith('xmpp:', i);
+}
+
+// Length of marked's inline text token at the start of s (same result as its gfm text regex).
+function textLen(s, at, colon) {
+  const n = s.length;
+  const c0 = s.charCodeAt(0);
+  if (colon && !isAlnum(c0) && mailProto(s, 1)) return 1;
+  let p = 1;
+  if (c0 === 96 || c0 === 126) while (p < n && s.charCodeAt(p) === c0) p++;
+  if (p >= n) return n;
+  const c1 = s.charCodeAt(p);
+  if (c1 === 96 || c1 === 126) return p;
+  if (c1 === 32 && spacesNl(s, p)) return p;
+  if (at && mailAhead(s, p)) return p;
+  for (let q = p; q < n; q++) {
+    const ch = s.charCodeAt(q);
+    switch (ch) {
+      case 92: case 60: case 33: case 91: case 96: case 42: case 126: case 95: return q;
+      case 104: case 72: {
+        const a = s.charCodeAt(q + 1) | 32, b = s.charCodeAt(q + 2) | 32, d = s.charCodeAt(q + 3) | 32;
+        if (a === 116 && b === 116 && d === 112) return q;
+        break;
+      }
+      case 102: case 70:
+        if ((s.charCodeAt(q + 1) | 32) === 116 && (s.charCodeAt(q + 2) | 32) === 112 && s.startsWith('://', q + 3)) return q;
+        break;
+      case 119:
+        if (s.startsWith('ww.', q + 1)) {
+          const b = s.charCodeAt(q - 1);
+          if (b === 42 || b === 95 || b === 126 || b === 40 || isJsSpace(b)) return q;
+        }
+        break;
+    }
+    if (ch !== 32 && s.charCodeAt(q + 1) === 32 && spacesNl(s, q + 1)) return q + 1;
+    if (colon && !isAlnum(ch) && mailProto(s, q + 1)) return q + 1;
+    if (at && !isMailCh(ch) && mailAhead(s, q + 1)) return q + 1;
+  }
+  return n;
 }
 
 function inlineLink(src, m, mode) {
