@@ -66,7 +66,6 @@ const EMAIL = R`[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(
 const reUrl = new RegExp(R`^(?:mailto:${EMAIL}|xmpp:${EMAIL}(?:\/[A-Za-z0-9@.]+)?)|^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9\-]+\.?)+[^\s<]*|^${EMAIL.replace('@', '(@)')}`);
 const reBackpedal = /(?:[^?!.,:;*_'"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'"~)]+(?!$))+/;
 const EMAILCH = R`a-zA-Z0-9.!#$%&'*+\/=?_${BT}{\|}~-`;
-const reInlineText = new RegExp(R`^(?:[^a-zA-Z0-9](?=(?:mailto|xmpp):)|(${BT}+|~+|[^${BT}~])(?:(?=[${BT}~])|(?= {2,}\n)|(?=[${EMAILCH}]+@)|[\s\S]*?(?:(?=[\\<!\[${BT}*~_]|\b_|[hH][tT][tT][pP][sS]?|[fF][tT][pP]:\/\/|(?<![^\s*_~(])www\.|$)|[^ ](?= {2,}\n)|[^a-zA-Z0-9](?=(?:mailto|xmpp):)|[^${EMAILCH}](?=[${EMAILCH}]+@))))`);
 const P_ = R`[\p{P}\p{S}]`;
 const PS = R`[\s\p{P}\p{S}]`;
 const NPS = R`[^\s\p{P}\p{S}]`;
@@ -82,7 +81,24 @@ const reTagY = new RegExp(reTag.source.replace(/\^/g, (c, i, s) => (s[i - 1] ===
 const reCodespanY = /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/y;
 const reBrY = /( {2,}|\\)\n(?!\s*$)[ \t]*/y;
 const reAutolinkY = new RegExp(reAutolink.source.slice(1), 'y');
-const reTextY = new RegExp(reInlineText.source.slice(1), 'y');
+// The text rule when no '@' lies ahead (its two email lookaheads cannot match then), rewritten so the
+// scan is a greedy run of "safe" characters instead of a lazy [\s\S]*? that tries every stop rule at
+// every position. A position is safe when none of the stop rules (a) stop character, http, ftp://,
+// www. after a boundary or the end; (b) a non-space before two or more spaces and a newline; (c) a
+// non-alphanumeric before mailto:/xmpp: holds there; the run then ends where one does, and the
+// tail consumes one character exactly when (a) fails, as the original alternation order does.
+// With an '@' ahead, rule (d) a non-email character before email characters and '@' joins (b), (c):
+// it can only hold after a space or a punctuation character outside the email set.
+const NL2 = R` {2,}\n`;
+const MX = R`(?:mailto|xmpp):`;
+const STOP = R`[\\<!\[${BT}*~_]|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|(?<![^\s*_~(])www\.|$`;
+function textRule(at) {
+  const em = at ? R`|[${EMAILCH}]+@` : '';
+  const safe = R`(?:[a-egi-vx-zA-EGI-Z0-9](?!${NL2})| (?!${MX}${em})|[.#$%&'+\/=?{|}\-](?!${MX}|${NL2})|[^a-zA-Z0-9 \\<!\[${BT}*~_.#$%&'+\/=?{|}\-](?!${MX}|${NL2}${em})|[hH](?![tT][tT][pP]|${NL2})|[fF](?![tT][pP]:\/\/|${NL2})|w(?:(?<=[^\s*_~(]w)|(?!ww\.))(?!${NL2}))`;
+  return new RegExp(R`[^a-zA-Z0-9](?=${MX})|(?:${BT}+|~+|[^${BT}~])(?:(?=[${BT}~])|(?=${NL2})${at ? R`|(?=[${EMAILCH}]+@)` : ''}|${safe}*(?:(?=${STOP})|[\s\S]))`, 'y');
+}
+const reTextNoAtY = textRule(false);
+const reTextAtY = textRule(true);
 const reEmLeftY = new RegExp(reEmLeft.source.replace(/\^/g, (c, i, s) => (s[i - 1] === '[' ? c : '')), 'uy');
 const reDelLeftY = new RegExp(reDelLeft.source.slice(1), 'uy');
 const rePunct = new RegExp(R`^((?![*_])${PS})`, 'u');
@@ -856,9 +872,11 @@ function lexInline(whole, mode) {
       continue;
     }
     // text
-    reTextY.lastIndex = pos;
-    reTextY.test(whole);
-    const end = reTextY.lastIndex;
+    if (atIdx !== -1 && atIdx < pos) atIdx = whole.indexOf('@', pos);
+    const reT = atIdx === -1 ? reTextNoAtY : reTextAtY;
+    reT.lastIndex = pos;
+    reT.test(whole);
+    const end = reT.lastIndex;
     const raw = whole.slice(pos, end);
     pos = end;
     if (whole.charCodeAt(end - 1) !== 95) prev = whole[end - 1];
