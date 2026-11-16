@@ -75,6 +75,16 @@ const reEmRightAst = new RegExp(R`^[^_*]*?__[^_*]*?\*[^_*]*?(?=__)|[^*]+(?=[^*])
 const reEmRightUnd = new RegExp(R`^[^_*]*?\*\*[^_*]*?_[^_*]*?(?=\*\*)|[^_]+(?=[^_])|(?!_)${P_}(_+)(?=[\s]|$)|${NPS}(_+)(?!_)(?=${PS}|$)|(?!_)${PS}(_+)(?=${NPS})|[\s](_+)(?!_)(?=${P_})|(?!_)${P_}(_+)(?!_)(?=${P_})`, 'gu');
 const reDelLeft = new RegExp(R`^~~?(?:((?!~)${P_})|[^\s~])`, 'u');
 const reDelRight = new RegExp(R`^[^~]+(?=[^~])|(?!~)${P_}(~~?)(?=[\s]|$)|${NPS}(~~?)(?!~)(?=${PS}|$)|(?!~)${PS}(~~?)(?=${NPS})|[\s](~~?)(?!~)(?=${P_})|(?!~)${P_}(~~?)(?!~)(?=${P_})|${NPS}(~~?)(?=${NPS})`, 'gu');
+// Sticky twins used by the position-based inline loop (same patterns without the leading ^; none
+// of them looks behind its start, so matching inside the whole string equals matching a suffix).
+const reEscapeY = /\\([!"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])/y;
+const reTagY = new RegExp(reTag.source.replace(/\^/g, (c, i, s) => (s[i - 1] === '[' ? c : '')), 'y');
+const reCodespanY = /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/y;
+const reBrY = /( {2,}|\\)\n(?!\s*$)[ \t]*/y;
+const reAutolinkY = new RegExp(reAutolink.source.slice(1), 'y');
+const reTextY = new RegExp(reInlineText.source.slice(1), 'y');
+const reEmLeftY = new RegExp(reEmLeft.source.replace(/\^/g, (c, i, s) => (s[i - 1] === '[' ? c : '')), 'uy');
+const reDelLeftY = new RegExp(reDelLeft.source.slice(1), 'uy');
 const rePunct = new RegExp(R`^((?![*_])${PS})`, 'u');
 const reAlnum = /[\p{L}\p{N}]/u;
 
@@ -677,49 +687,54 @@ function autoLinkHtml(text, href, mode) {
   return '<a href="' + escAll(u) + '">' + inner + '</a>';
 }
 
-function lexInline(src, mode) {
-  const whole = src;
+function lexInline(whole, mode) {
+  const n = whole.length;
+  let pos = 0;
   let masked = null;
   let atIdx = -2;
   let out = '';
   let pend = null, pendEsc = false;
   let keepPrev = false, prev = '';
   let closers = null;
-  let guard = Infinity;
-  while (src) {
-    if (src.length < guard) guard = src.length;
-    else throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
+  while (pos < n) {
     if (!keepPrev) prev = '';
     keepPrev = false;
-    const c = src.charCodeAt(0);
+    const c = whole.charCodeAt(pos);
     let m, h;
     // escape
-    if (c === 92 && (m = reEscape.exec(src))) {
-      if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
-      out += mode ? m[1] : escSoft(m[1]);
-      src = src.substring(m[0].length);
-      continue;
+    if (c === 92) {
+      reEscapeY.lastIndex = pos;
+      if ((m = reEscapeY.exec(whole))) {
+        if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
+        out += mode ? m[1] : escSoft(m[1]);
+        pos += 2;
+        continue;
+      }
     }
     // inline html
-    if (c === 60 && (m = reTag.exec(src))) {
-      const raw = m[0];
-      if (!inLink && /^<a /i.test(raw)) inLink = true;
-      else if (inLink && /^<\/a>/i.test(raw)) inLink = false;
-      if (!inRawBlock && /^<(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = true;
-      else if (inRawBlock && /^<\/(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = false;
-      if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
-      out += raw;
-      src = src.substring(raw.length);
-      continue;
+    if (c === 60) {
+      reTagY.lastIndex = pos;
+      if ((m = reTagY.exec(whole))) {
+        const raw = m[0];
+        if (!inLink && /^<a /i.test(raw)) inLink = true;
+        else if (inLink && /^<\/a>/i.test(raw)) inLink = false;
+        if (!inRawBlock && /^<(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = true;
+        else if (inRawBlock && /^<\/(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = false;
+        if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
+        out += raw;
+        pos += raw.length;
+        continue;
+      }
     }
     if (c === 91 || c === 33) {
+      const src = whole.slice(pos);
       // inline link
       if (parenPossible !== false && (m = reLink.exec(src))) {
         h = inlineLink(src, m, mode);
         if (h !== undefined && h !== null) {
           if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
           out += h;
-          src = src.substring(m[0].length);
+          pos += m[0].length;
           continue;
         }
       }
@@ -730,14 +745,14 @@ function lexInline(src, mode) {
           if (!ref) {
             const ch = m[0].charAt(0);
             if (pend !== null) pend += ch; else { pend = ch; pendEsc = false; }
-            src = src.substring(1);
+            pos += 1;
             continue;
           }
           h = outLink(m, ref.href, ref.title, mode);
           if (h !== null) {
             if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
             out += h;
-            src = src.substring(m[0].length);
+            pos += m[0].length;
             continue;
           }
         }
@@ -746,47 +761,56 @@ function lexInline(src, mode) {
     // emphasis
     if (c === 42 || c === 95) {
       if (closers === null) { masked = mask(whole); closers = lastCloser(masked); }
-      const r = emStrong(src, masked, prev, closers, mode);
+      const r = emStrong(whole, pos, masked, prev, closers, mode);
       if (r !== undefined) {
         if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
         out += r[1];
-        src = src.substring(r[0]);
+        pos += r[0];
         continue;
       }
     }
     // code span
-    if (c === 96 && (m = reCodespan.exec(src))) {
-      let t = m[2].replace(/\n/g, ' ');
-      if (/[^ ]/.test(t) && t.charCodeAt(0) === 32 && t.charCodeAt(t.length - 1) === 32) t = t.substring(1, t.length - 1);
-      if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
-      out += mode ? t : '<code>' + escAll(t) + '</code>';
-      src = src.substring(m[0].length);
-      continue;
+    if (c === 96) {
+      reCodespanY.lastIndex = pos;
+      if ((m = reCodespanY.exec(whole))) {
+        let t = m[2].replace(/\n/g, ' ');
+        if (/[^ ]/.test(t) && t.charCodeAt(0) === 32 && t.charCodeAt(t.length - 1) === 32) t = t.substring(1, t.length - 1);
+        if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
+        out += mode ? t : '<code>' + escAll(t) + '</code>';
+        pos += m[0].length;
+        continue;
+      }
     }
     // hard break
-    if ((c === 32 || c === 92) && (m = reBr.exec(src))) {
-      if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
-      out += mode ? '' : '<br>';
-      src = src.substring(m[0].length);
-      continue;
+    if (c === 32 || c === 92) {
+      reBrY.lastIndex = pos;
+      if ((m = reBrY.exec(whole))) {
+        if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
+        out += mode ? '' : '<br>';
+        pos += m[0].length;
+        continue;
+      }
     }
     // strikethrough
     if (c === 126) {
       if (closers === null) { masked = mask(whole); closers = lastCloser(masked); }
-      const r = del(src, masked, prev, closers, mode);
+      const r = del(whole, pos, masked, prev, closers, mode);
       if (r !== undefined) {
         if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
         out += r[1];
-        src = src.substring(r[0]);
+        pos += r[0];
         continue;
       }
     }
     // <autolink>
-    if (c === 60 && (m = reAutolink.exec(src))) {
-      if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
-      out += autoLinkHtml(m[1], m[2] === '@' ? 'mailto:' + m[1] : m[1], mode);
-      src = src.substring(m[0].length);
-      continue;
+    if (c === 60) {
+      reAutolinkY.lastIndex = pos;
+      if ((m = reAutolinkY.exec(whole))) {
+        if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
+        out += autoLinkHtml(m[1], m[2] === '@' ? 'mailto:' + m[1] : m[1], mode);
+        pos += m[0].length;
+        continue;
+      }
     }
     // bare url / email
     let urlOk = false;
@@ -794,12 +818,11 @@ function lexInline(src, mode) {
       if (c === 104 || c === 72 || c === 102 || c === 70 || c === 119 || c === 109 || c === 120) urlOk = true;
       else if (isAlnum(c) || c === 46 || c === 95 || c === 43 || c === 45) {
         // email branch: needs an '@' ahead
-        const pos = whole.length - src.length;
         if (atIdx !== -1 && atIdx < pos) atIdx = whole.indexOf('@', pos);
         urlOk = atIdx !== -1;
       }
     }
-    if (urlOk && (m = reUrl.exec(src))) {
+    if (urlOk && (m = reUrl.exec(whole.slice(pos)))) {
       let text, href;
       if (m[2] === '@') { text = m[0]; href = 'mailto:' + text; }
       else {
@@ -810,18 +833,19 @@ function lexInline(src, mode) {
       }
       if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
       out += autoLinkHtml(text, href, mode);
-      src = src.substring(m[0].length);
+      pos += m[0].length;
       continue;
     }
     // text
-    {
-      const raw = reInlineText.exec(src)[0];
-      const text = inRawBlock ? raw : decodeRefs(raw);
-      src = src.substring(raw.length);
-      if (raw.charCodeAt(raw.length - 1) !== 95) prev = raw.slice(-1);
-      keepPrev = true;
-      if (pend !== null) pend += text; else { pend = text; pendEsc = inRawBlock; }
-    }
+    reTextY.lastIndex = pos;
+    reTextY.test(whole);
+    const end = reTextY.lastIndex;
+    const raw = whole.slice(pos, end);
+    pos = end;
+    if (whole.charCodeAt(end - 1) !== 95) prev = whole[end - 1];
+    keepPrev = true;
+    const text = inRawBlock ? raw : decodeRefs(raw);
+    if (pend !== null) pend += text; else { pend = text; pendEsc = inRawBlock; }
   }
   if (pend !== null) out += (mode || pendEsc) ? pend : escSoft(pend);
   return out;
@@ -875,12 +899,12 @@ function lastCp(s) {
 const firstCpLen = (s) => { const c = s.charCodeAt(0); return c >= 0xd800 && c <= 0xdbff && s.length > 1 && (s.charCodeAt(1) & 0xfc00) === 0xdc00 ? 2 : 1; };
 
 // returns [consumed length, html] or undefined
-function emStrong(src, masked, prev, closers, mode) {
-  let m = reEmLeft.exec(src);
+function emStrong(whole, pos, masked, prev, closers, mode) {
+  reEmLeftY.lastIndex = pos;
+  let m = reEmLeftY.exec(whole);
   if (!m || (!m[1] && !m[2] && !m[3] && !m[4])) return undefined;
   const ch = m[0][0];
   const sameAsPrev = prev === ch;
-  const pos = masked.length - src.length;
   let l = pos;
   while (l > 0 && masked[l - 1] === ch) l--;
   const before = lastCp(masked.slice(Math.max(0, l - 2), l));
@@ -896,9 +920,9 @@ function emStrong(src, masked, prev, closers, mode) {
   const strict = !!before.trim() && (!!lead || (ch === '*' && !beforePunct));
   const re = ch === '*' ? reEmRightAst : reEmRightUnd;
   const last = ch === '*' ? closers.ast : closers.und;
-  const q = masked.length - src.length + k;
+  const q = pos + k;
   if (last < q) return undefined;
-  const t = masked.slice(-1 * src.length + k);
+  const t = masked.slice(q);
   const limit = last - q;
   re.lastIndex = 0;
   while ((m = re.exec(t)) !== null && !(m.index > limit)) {
@@ -914,7 +938,7 @@ function emStrong(src, masked, prev, closers, mode) {
     if (need > 0) continue;
     b = Math.min(b, b + need + carry);
     const first = firstCpLen(m[0]);
-    const raw = src.slice(0, k + m.index + first + b);
+    const raw = whole.slice(pos, pos + k + m.index + first + b);
     if (Math.min(k, b) % 2) {
       const inner = inlineTokens(raw.slice(1, -1), mode);
       return [raw.length, mode ? inner : '<em>' + inner + '</em>'];
@@ -925,16 +949,17 @@ function emStrong(src, masked, prev, closers, mode) {
   return undefined;
 }
 
-function del(src, masked, prev, closers, mode) {
-  let m = reDelLeft.exec(src);
+function del(whole, pos, masked, prev, closers, mode) {
+  reDelLeftY.lastIndex = pos;
+  let m = reDelLeftY.exec(whole);
   if (!m) return undefined;
   if (!(!(m[1] || '') || !prev || rePunct.exec(prev))) return undefined;
   const k = cpLen(m[0]) - 1;
   let need = k;
   const last = closers.del;
-  const q = masked.length - src.length + k;
+  const q = pos + k;
   if (last < q) return undefined;
-  const t = masked.slice(-1 * src.length + k);
+  const t = masked.slice(q);
   const limit = last - q;
   reDelRight.lastIndex = 0;
   while ((m = reDelRight.exec(t)) !== null && !(m.index > limit)) {
@@ -947,7 +972,7 @@ function del(src, masked, prev, closers, mode) {
     if (need > 0) continue;
     b = Math.min(b, b + need);
     const first = firstCpLen(m[0]);
-    const raw = src.slice(0, k + m.index + first + b);
+    const raw = whole.slice(pos, pos + k + m.index + first + b);
     const inner = inlineTokens(raw.slice(k, -k), mode);
     return [raw.length, mode ? inner : '<del>' + inner + '</del>'];
   }
