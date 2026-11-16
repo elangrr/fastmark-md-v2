@@ -559,22 +559,22 @@ function list(src) {
 // ---------------------------------------------------------------------------------------------
 // Inline lexer + renderer. mode 0 renders HTML, mode 1 renders the plain text used for image alt.
 // ---------------------------------------------------------------------------------------------
-function lastCloser(s) {
-  // last run start of each delimiter that is not preceded by whitespace
-  let ast = -1, und = -1, del = -1;
-  const n = s.length;
-  for (let i = 0; i < n; i++) {
-    const c = s.charCodeAt(i);
-    if (c !== 42 && c !== 95 && c !== 126) continue;
-    const before = i === 0 ? 10 : s.charCodeAt(i - 1);
-    let k = i + 1;
-    while (k < n && s.charCodeAt(k) === c) k++;
-    if (before !== 32 && before !== 9 && before !== 10 && before !== 13 && before !== 12) {
-      if (c === 126) del = i; else if (c === 42) ast = i; else und = i;
-    }
-    i = k - 1;
+// Start of the last maximal run of `ch` in s whose preceding char is not a space, tab, newline,
+// CR or form feed (a run at index 0 counts as preceded by a newline); -1 if none.
+function lastRunStart(s, ch) {
+  let i = s.lastIndexOf(ch);
+  while (i !== -1) {
+    while (i > 0 && s[i - 1] === ch) i--;
+    if (i === 0) return -1;
+    const b = s.charCodeAt(i - 1);
+    if (b !== 32 && b !== 9 && b !== 10 && b !== 13 && b !== 12) return i;
+    i = s.lastIndexOf(ch, i - 2);
   }
-  return { ast, und, del };
+  return -1;
+}
+
+function lastCloser(s) {
+  return { ast: lastRunStart(s, '*'), und: lastRunStart(s, '_'), del: lastRunStart(s, '~') };
 }
 
 function inlineTokens(src, mode) {
