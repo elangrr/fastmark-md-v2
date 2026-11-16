@@ -41,8 +41,9 @@ const reFenceIn = indentRes((n) => new RegExp(`^ {0,${n}}(?:${BT}${BT}${BT}|~~~)
 const reHeadIn = indentRes((n) => new RegExp(`^ {0,${n}}#{1,6}(?:\\s|$)`));
 const reHtmlIn = indentRes((n) => new RegExp(`^ {0,${n}}(?:</?(?:${TAGS})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)`, 'i'));
 const reBqIn = indentRes((n) => new RegExp(`^ {0,${n}}>`));
-const itemRes = {};
-const itemRe = (bull) => itemRes[bull] || (itemRes[bull] = new RegExp(`^( {0,3}${bull})((?:[\t ][^\\n]*)?(?:\\n|$))`));
+// list item regexes for the five bullet kinds, built once at load
+const ITEM_RES = {};
+for (const bull of ['\\-', '\\*', '\\+', '\\d{1,9}\\.', '\\d{1,9}\\)']) ITEM_RES[bull] = new RegExp(`^( {0,3}${bull})((?:[\t ][^\\n]*)?(?:\\n|$))`);
 
 // ---------------------------------------------------------------------------------------------
 // Inline grammar
@@ -142,6 +143,32 @@ function expandTabs(s, col) {
     else { out += ch; col++; }
   }
   return out;
+}
+
+// /\n[ \t]*\n[ \t]*$/ as a backward scan
+function endsWithBlankLine(s) {
+  let i = s.length - 1;
+  while (i >= 0 && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) i--;
+  if (i < 0 || s.charCodeAt(i) !== 10) return false;
+  i--;
+  while (i >= 0 && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) i--;
+  return i >= 0 && s.charCodeAt(i) === 10;
+}
+
+function lineOf(s) {
+  const i = s.indexOf('\n');
+  return i < 0 ? s : s.slice(0, i);
+}
+
+// expand tabs in the leading run of spaces/tabs only (no-op when there is no tab there)
+function leadTabs(s, col) {
+  let i = 0, tab = false;
+  for (; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 9) tab = true;
+    else if (c !== 32) break;
+  }
+  return tab ? expandTabs(s.slice(0, i), col) + s.slice(i) : s;
 }
 
 function splitCells(row, count) {
@@ -392,6 +419,26 @@ function blockquote(src) {
   return { type: 'blockquote', raw, tokens: toks, text };
 }
 
+// Would `s` start a fence, heading, html block or hr (and, when `all`, a blockquote or another
+// bullet) indented by at most k spaces? Dispatches on the first non-space char so only the one
+// regex that char could start is run.
+function interrupts(s, k, all) {
+  let sp = 0;
+  while (sp < s.length && s.charCodeAt(sp) === 32) sp++;
+  if (sp > k) return false;
+  switch (s.charCodeAt(sp)) {
+    case 96: case 126: return reFenceIn[k].test(s);
+    case 35: return reHeadIn[k].test(s);
+    case 60: return reHtmlIn[k].test(s);
+    case 62: return all;
+    case 95: return reHrIn[k].test(s);
+    case 42: case 45: return (all && reNextBullet[k].test(s)) || reHrIn[k].test(s);
+    case 43: case 48: case 49: case 50: case 51: case 52: case 53: case 54: case 55: case 56: case 57:
+      return all && reNextBullet[k].test(s);
+    default: return false;
+  }
+}
+
 function list(src) {
   let m = reList.exec(src);
   if (!m) return undefined;
@@ -400,17 +447,17 @@ function list(src) {
   const ordered = bull.length > 1;
   const lst = { type: 'list', raw: '', ordered, start: ordered ? +bull.slice(0, -1) : '', loose: false, items: [] };
   bull = ordered ? `\\d{1,9}\\${bull.slice(-1)}` : `\\${bull}`;
-  const reItem = itemRe(bull);
+  const reItem = ITEM_RES[bull];
   let blankEnded = false;
   while (src) {
     let endEarly = false, body = '';
     if (!(m = reItem.exec(src)) || reHr.test(src)) break;
     const startAt = orig.length - src.length;
     src = src.substring(m[0].length);
-    const firstLine = m[2].split('\n', 1)[0];
+    const firstLine = lineOf(m[2]);
     const markLen = m[1].length;
-    let line = firstLine.replace(/^[ \t]+/, (ws) => expandTabs(ws, markLen));
-    let next = src.split('\n', 1)[0];
+    let line = leadTabs(firstLine, markLen);
+    let next = lineOf(src);
     let blank = !line.trim();
     let indent = 0;
     if (blank) indent = markLen + 1;
@@ -426,16 +473,15 @@ function list(src) {
     }
     if (!endEarly) {
       const k = Math.max(0, Math.min(3, indent - 1));
-      const nb = reNextBullet[k], hr = reHrIn[k], fe = reFenceIn[k], hd = reHeadIn[k], ht = reHtmlIn[k], bq = reBqIn[k];
       while (src) {
-        const rawLine = src.split('\n', 1)[0];
+        const rawLine = lineOf(src);
         next = rawLine;
-        const expanded = next.replace(/^[ \t]+/, (ws) => expandTabs(ws, 0));
-        if (fe.test(next) || hd.test(next) || ht.test(next) || bq.test(next) || nb.test(next) || hr.test(next)) break;
+        const expanded = leadTabs(next, 0);
+        if (interrupts(next, k, true)) break;
         if (expanded.search(/[^ ]/) >= indent || !next.trim()) {
           body += '\n' + expanded.slice(indent);
         } else {
-          if (blank || line.replace(/\t/g, '    ').search(/[^ ]/) >= 4 || fe.test(line) || hd.test(line) || ht.test(line) || hr.test(line)) break;
+          if (blank || line.replace(/\t/g, '    ').search(/[^ ]/) >= 4 || interrupts(line, k, false)) break;
           const setext = /^ {0,3}(?:=+|-+) *$/.test(next) && reLheading.test(`${line}\n${next}`);
           body += '\n' + (setext ? `    ${expanded.replace(/^ {0,3}/, '')}` : next);
         }
@@ -447,7 +493,7 @@ function list(src) {
     const itemRaw = orig.slice(startAt, orig.length - src.length);
     if (!lst.loose) {
       if (blankEnded) lst.loose = true;
-      else if (/\n[ \t]*\n[ \t]*$/.test(itemRaw)) blankEnded = true;
+      else if (endsWithBlankLine(itemRaw)) blankEnded = true;
     }
     lst.items.push({ raw: itemRaw, task: /^\[[ xX]\][ \t]+\S/.test(body), checked: undefined, text: body, tokens: null });
   }
@@ -516,8 +562,7 @@ function lastCloser(s) {
 function inlineTokens(src, mode) {
   const saved = parenPossible;
   parenPossible = saved && src.includes(')');
-  const masked = (src.includes('*') || src.includes('_') || src.includes('~')) ? mask(src) : src;
-  const out = lexInline(src, masked, mode);
+  const out = lexInline(src, mode);
   parenPossible = saved;
   return out;
 }
@@ -547,9 +592,10 @@ function maskRef(r) {
 
 function mask(src) {
   let t = src;
-  if (src.includes('[')) t = t.replace(reRefSearch, maskRef);
-  t = t.replace(reAnyPunctOutsideCode, (m, ticks, esc) => (esc ? '+'.repeat(m.length) : ticks ? ticks + m.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks : m));
-  t = t.replace(reBlockSkip, (m) => '[' + 'a'.repeat(m.length - 2) + ']');
+  const br = src.includes('['), bt = src.includes('`');
+  if (br) t = t.replace(reRefSearch, maskRef);
+  if (bt || src.includes('\\')) t = t.replace(reAnyPunctOutsideCode, (m, ticks, esc) => (esc ? '+'.repeat(m.length) : ticks ? ticks + m.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks : m));
+  if (br || bt || src.includes('<')) t = t.replace(reBlockSkip, (m) => '[' + 'a'.repeat(m.length - 2) + ']');
   return t;
 }
 
@@ -614,7 +660,9 @@ function autoLinkHtml(text, href, mode) {
   return '<a href="' + escAll(u) + '">' + inner + '</a>';
 }
 
-function lexInline(src, masked, mode) {
+function lexInline(src, mode) {
+  const whole = src;
+  let masked = null;
   let out = '';
   let pend = null, pendEsc = false;
   let keepPrev = false, prev = '';
@@ -679,7 +727,7 @@ function lexInline(src, masked, mode) {
     }
     // emphasis
     if (c === 42 || c === 95) {
-      if (closers === null) closers = lastCloser(masked);
+      if (closers === null) { masked = mask(whole); closers = lastCloser(masked); }
       const r = emStrong(src, masked, prev, closers, mode);
       if (r !== undefined) {
         if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
@@ -706,7 +754,7 @@ function lexInline(src, masked, mode) {
     }
     // strikethrough
     if (c === 126) {
-      if (closers === null) closers = lastCloser(masked);
+      if (closers === null) { masked = mask(whole); closers = lastCloser(masked); }
       const r = del(src, masked, prev, closers, mode);
       if (r !== undefined) {
         if (pend !== null) { out += (mode || pendEsc) ? pend : escSoft(pend); pend = null; }
